@@ -1,24 +1,12 @@
-###################
-### DIRECTORIES ###
-###################
+###########################
+### FILES & DIRECTORIES ###
+###########################
 
+# bibliography
+*.bib
 
-figures
-internal
-research
-
-
-#############
-### FILES ###
-#############
-
-
-*.docx
-template*
-*.tex
+# finder data
 *.DS_Store
-.RDataTmp*
-
 
 ##############
 ### PYTHON ###
