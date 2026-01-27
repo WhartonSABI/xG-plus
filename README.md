@@ -1,6 +1,6 @@
 # xG+: A Probabilistic Framework for Goalscoring in Soccer
 
-#### Authors: Jonathan Pipping-Gamon, Tianshu Feng, and Paul Sabin
+#### Authors: Jonathan Pipping-Gam\'on, Tianshu Feng, and Paul Sabin
 
 This repository contains materials for the xG+ project, including our
 slides, paper, and supporting code.
