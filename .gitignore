@@ -8,6 +8,9 @@
 # finder data
 *.DS_Store
 
+# tex files
+*.tex
+
 ##############
 ### PYTHON ###
 ##############
