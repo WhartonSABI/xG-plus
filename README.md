@@ -1,4 +1,4 @@
-# xG+: A Probabilistic Framework for Shot Occurrences in Soccer
+# xG+: A Probabilistic Framework for Goalscoring in Soccer
 
 Authors: Jonathan Pipping-Gamon, Tianshu Feng, Paul Sabin
 
