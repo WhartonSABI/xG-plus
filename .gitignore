@@ -8,6 +8,9 @@
 # finder data
 *.DS_Store
 
+# presentation pdfs
+presentation.pdf
+
 # tex files
 *.tex
 
