@@ -11,6 +11,15 @@
 # tex files
 *.tex
 
+# internal files
+internal/
+paul*
+pff*
+sagemaker/
+sample-data/
+scripts/
+xg-data/
+
 ##############
 ### PYTHON ###
 ##############
