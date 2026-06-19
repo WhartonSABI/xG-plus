@@ -21,14 +21,20 @@ from typing import Iterable
 
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+from pitch_geometry import (
+    CENTER_CIRCLE_RADIUS,
+    GOAL_AREA_DEPTH,
+    GOAL_AREA_WIDTH,
+    PENALTY_AREA_DEPTH,
+    PENALTY_AREA_WIDTH,
+    PENALTY_SPOT_DISTANCE,
+    DEFAULT_PITCH_LENGTH,
+    DEFAULT_PITCH_WIDTH,
+    PitchDimensions,
+)
 
 
-PITCH_LENGTH = 105.0
-PITCH_WIDTH = 68.0
-PITCH_X_MIN = -PITCH_LENGTH / 2
-PITCH_X_MAX = PITCH_LENGTH / 2
-PITCH_Y_MIN = -PITCH_WIDTH / 2
-PITCH_Y_MAX = PITCH_WIDTH / 2
+DEFAULT_PITCH = PitchDimensions(DEFAULT_PITCH_LENGTH, DEFAULT_PITCH_WIDTH)
 
 COLORS = {
     "bg": (244, 246, 241),
@@ -101,10 +107,30 @@ def build_cumulative(metric: pd.DataFrame, mode: str) -> pd.Series:
     return metric["int_sec"].map(second_to_cum).ffill().fillna(0.0)
 
 
-def xy_to_pitch_px(x: float, y: float, box: tuple[int, int, int, int]) -> tuple[int, int]:
+def first_numeric_value(df: pd.DataFrame, column: str) -> float | None:
+    if column not in df.columns:
+        return None
+    values = pd.to_numeric(df[column], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.iloc[0])
+
+
+def pitch_from_data(
+    metric: pd.DataFrame,
+    tracking: pd.DataFrame,
+    length_override: float | None,
+    width_override: float | None,
+) -> PitchDimensions:
+    length = length_override or first_numeric_value(metric, "pitch_length") or first_numeric_value(tracking, "pitch_length")
+    width = width_override or first_numeric_value(metric, "pitch_width") or first_numeric_value(tracking, "pitch_width")
+    return PitchDimensions(length or DEFAULT_PITCH_LENGTH, width or DEFAULT_PITCH_WIDTH)
+
+
+def xy_to_pitch_px(x: float, y: float, box: tuple[int, int, int, int], pitch: PitchDimensions = DEFAULT_PITCH) -> tuple[int, int]:
     left, top, right, bottom = box
-    px = left + (x - PITCH_X_MIN) / PITCH_LENGTH * (right - left)
-    py = bottom - (y - PITCH_Y_MIN) / PITCH_WIDTH * (bottom - top)
+    px = left + (x - pitch.x_min) / pitch.length * (right - left)
+    py = bottom - (y - pitch.y_min) / pitch.width * (bottom - top)
     return int(round(px)), int(round(py))
 
 
@@ -112,7 +138,11 @@ def draw_text(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font, f
     draw.text(xy, text, font=font, fill=fill)
 
 
-def draw_pitch(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int]) -> None:
+def draw_pitch(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    pitch: PitchDimensions = DEFAULT_PITCH,
+) -> None:
     left, top, right, bottom = box
     stripe_count = 10
     stripe_w = (right - left) / stripe_count
@@ -126,22 +156,24 @@ def draw_pitch(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int]) -> Non
     mid_x = (left + right) // 2
     mid_y = (top + bottom) // 2
     draw.line([(mid_x, top), (mid_x, bottom)], fill=line, width=2)
-    draw.ellipse([mid_x - 54, mid_y - 54, mid_x + 54, mid_y + 54], outline=line, width=2)
+    circle_rx = CENTER_CIRCLE_RADIUS / pitch.length * (right - left)
+    circle_ry = CENTER_CIRCLE_RADIUS / pitch.width * (bottom - top)
+    draw.ellipse([mid_x - circle_rx, mid_y - circle_ry, mid_x + circle_rx, mid_y + circle_ry], outline=line, width=2)
     draw.ellipse([mid_x - 4, mid_y - 4, mid_x + 4, mid_y + 4], fill=line)
 
     # Penalty boxes, six-yard boxes, and spots.
     for side in ["left", "right"]:
         goal_x = left if side == "left" else right
         sign = 1 if side == "left" else -1
-        pen_x = goal_x + sign * (16.5 / PITCH_LENGTH) * (right - left)
-        six_x = goal_x + sign * (5.5 / PITCH_LENGTH) * (right - left)
-        pen_y0 = mid_y - (40.32 / PITCH_WIDTH) * (bottom - top) / 2
-        pen_y1 = mid_y + (40.32 / PITCH_WIDTH) * (bottom - top) / 2
-        six_y0 = mid_y - (18.32 / PITCH_WIDTH) * (bottom - top) / 2
-        six_y1 = mid_y + (18.32 / PITCH_WIDTH) * (bottom - top) / 2
+        pen_x = goal_x + sign * (PENALTY_AREA_DEPTH / pitch.length) * (right - left)
+        six_x = goal_x + sign * (GOAL_AREA_DEPTH / pitch.length) * (right - left)
+        pen_y0 = mid_y - (PENALTY_AREA_WIDTH / pitch.width) * (bottom - top) / 2
+        pen_y1 = mid_y + (PENALTY_AREA_WIDTH / pitch.width) * (bottom - top) / 2
+        six_y0 = mid_y - (GOAL_AREA_WIDTH / pitch.width) * (bottom - top) / 2
+        six_y1 = mid_y + (GOAL_AREA_WIDTH / pitch.width) * (bottom - top) / 2
         draw.rectangle([min(goal_x, pen_x), pen_y0, max(goal_x, pen_x), pen_y1], outline=line, width=2)
         draw.rectangle([min(goal_x, six_x), six_y0, max(goal_x, six_x), six_y1], outline=line, width=2)
-        spot_x = goal_x + sign * (11 / PITCH_LENGTH) * (right - left)
+        spot_x = goal_x + sign * (PENALTY_SPOT_DISTANCE / pitch.length) * (right - left)
         draw.ellipse([spot_x - 3, mid_y - 3, spot_x + 3, mid_y + 3], fill=line)
 
 
@@ -151,12 +183,13 @@ def draw_players(
     pitch_box: tuple[int, int, int, int],
     font_small,
     team_styles: dict[str, dict[str, tuple[int, int, int]]] | None = None,
+    pitch: PitchDimensions = DEFAULT_PITCH,
 ) -> None:
     team_styles = team_styles or {}
     for _, row in tracking_rows.iterrows():
         if pd.isna(row["x"]) or pd.isna(row["y"]):
             continue
-        x, y = xy_to_pitch_px(float(row["x"]), float(row["y"]), pitch_box)
+        x, y = xy_to_pitch_px(float(row["x"]), float(row["y"]), pitch_box, pitch)
         team = str(row["team"])
         if team == "ball":
             radius = 3
@@ -319,9 +352,10 @@ def render_frame(
     draw_metric_box(draw, ticker_x + 408, ticker_y, "cum xG+", float(row["cum_xG_plus"]), COLORS["cumulative"], fonts["tiny"], fonts["metric"])
 
     pitch_box = (34, 104, width - 34, 610)
-    draw_pitch(draw, pitch_box)
+    pitch = getattr(args, "pitch", DEFAULT_PITCH)
+    draw_pitch(draw, pitch_box, pitch)
     tracking_rows = tracking_by_frame.get(frame_num, pd.DataFrame())
-    draw_players(draw, tracking_rows, pitch_box, fonts["jersey"])
+    draw_players(draw, tracking_rows, pitch_box, fonts["jersey"], pitch=pitch)
 
     if not pd.isna(row.get("player_name")):
         draw.rounded_rectangle([48, 622, 330, 650], radius=8, fill=(255, 255, 255), outline=(226, 230, 224), width=1)
@@ -353,6 +387,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cumulative-mode", choices=["second-max", "frame-sum"], default="second-max")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=900)
+    parser.add_argument("--pitch-length", type=float, default=None)
+    parser.add_argument("--pitch-width", type=float, default=None)
     return parser.parse_args()
 
 
@@ -369,6 +405,7 @@ def main() -> None:
 
     metric = pd.read_csv(metric_path).sort_values("frameNum").reset_index(drop=True)
     tracking = pd.read_csv(tracking_path).sort_values("frameNum")
+    args.pitch = pitch_from_data(metric, tracking, args.pitch_length, args.pitch_width)
     metric["frameNum"] = metric["frameNum"].astype(int)
     tracking["frameNum"] = tracking["frameNum"].astype(int)
     metric["int_sec"] = metric.get("int_sec", metric["periodGameClockTime"].astype(int)).astype(int)

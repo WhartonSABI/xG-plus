@@ -13,11 +13,19 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pitch_geometry import GOAL_AREA_WIDTH, PitchDimensions, active_pitch_dimensions
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover
     def tqdm(iterable=None, *args, **kwargs):
         return iterable
+
+
+OPEN_GOAL_HALF_WIDTH = GOAL_AREA_WIDTH / 2.0
+PLAYER_BLOCK_RADIUS = 0.375
+# The existing openGoal feature measures the visible six-yard-box mouth,
+# so this remains a fixed soccer dimension rather than pitch-width metadata.
+EXTRACTION_VERSION = "pitch-possession-v2"
 
 
 def tangent_inter(x0: float, y0: float, a: float, b: float, r: float, x_line: float) -> list[float]:
@@ -58,6 +66,21 @@ def parse_args() -> argparse.Namespace:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def sidecar_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.metadata.json")
+
+
+def output_is_current(path: Path, version_key: str, version: str) -> bool:
+    meta_path = sidecar_path(path)
+    if not path.exists() or not meta_path.exists():
+        return False
+    try:
+        metadata = load_json(meta_path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(metadata, dict) and metadata.get(version_key) == version
 
 
 def safe_int(value: Any) -> int | None:
@@ -107,6 +130,20 @@ def compute_in_play(df: pd.DataFrame) -> pd.Series:
     return pd.Series(in_play_flags, index=df.index, dtype=bool)
 
 
+def compute_possession_side(df: pd.DataFrame) -> pd.Series:
+    sides: list[bool | None] = []
+    current_side: bool | None = None
+    for event in df["game_event"]:
+        if event is not None:
+            event_type = event.get("game_event_type")
+            if event_type in {"OUT", "END"}:
+                current_side = None
+            elif event.get("home_ball") is not None:
+                current_side = bool(event.get("home_ball"))
+        sides.append(current_side)
+    return pd.Series(sides, index=df.index, dtype=object)
+
+
 def compute_ball_xyz(ball: Any, axis: str) -> float | None:
     if ball is None or not isinstance(ball, dict):
         return None
@@ -133,69 +170,95 @@ def game_paths(tracking_root: Path, competition: str, season: str) -> list[tuple
     return entries
 
 
-def compute_frame_features(attacks: pd.DataFrame, home_lookup: dict[int, dict[str, Any]], away_lookup: dict[int, dict[str, Any]]) -> pd.DataFrame:
-    attacks["homePlayersRelative"] = [[] for _ in range(len(attacks))]
-    attacks["awayPlayersRelative"] = [[] for _ in range(len(attacks))]
-    attacks["GK_r"] = np.nan
-    attacks["GK_theta"] = np.nan
-    attacks["openGoal"] = np.nan
+def compute_frame_features(
+    attacks: pd.DataFrame,
+    home_lookup: dict[int, dict[str, Any]],
+    away_lookup: dict[int, dict[str, Any]],
+    pitch: PitchDimensions,
+) -> pd.DataFrame:
+    goal_x = pitch.length / 2.0
+    home_relative_rows: list[list[dict[str, Any]]] = []
+    away_relative_rows: list[list[dict[str, Any]]] = []
+    gk_r_values: list[float] = []
+    gk_theta_values: list[float] = []
+    open_goal_values: list[float] = []
 
-    for frame in range(len(attacks)):
+    frame_values = zip(
+        attacks["is_home"].tolist(),
+        attacks["x_flipped"].astype(float).tolist(),
+        attacks["y_flipped"].astype(float).tolist(),
+        attacks["attack_direction"].tolist(),
+        attacks["homePlayersSmoothed"].tolist(),
+        attacks["awayPlayersSmoothed"].tolist(),
+    )
+
+    for atk_home_raw, ball_x, ball_y, atk_dir_raw, home_players, away_players in frame_values:
         cover_l: list[float] = []
         cover_r: list[float] = []
-        atk_home = bool(attacks.at[frame, "is_home"])
-        ball_x = float(attacks.at[frame, "x_flipped"])
-        ball_y = float(attacks.at[frame, "y_flipped"])
+        atk_home = bool(atk_home_raw)
+        atk_dir = 0 if pd.isna(atk_dir_raw) else int(atk_dir_raw)
+        flip = 1 - 2 * atk_dir
+        gk_r = np.nan
+        gk_theta = np.nan
 
-        def add_player(team_key: str, player: dict[str, Any], lookup: dict[int, dict[str, Any]], defender_side: bool) -> None:
-            jersey = safe_int(player.get("jerseyNum"))
-            x_raw = player.get("x")
-            y_raw = player.get("y")
-            if jersey is None or x_raw is None or y_raw is None:
-                return
-            atk_dir_raw = attacks.at[frame, "attack_direction"]
-            atk_dir = 0 if pd.isna(atk_dir_raw) else int(atk_dir_raw)
-            x_flipped = float(x_raw) * (1 - 2 * atk_dir)
-            y_flipped = float(y_raw) * (1 - 2 * atk_dir)
-            r = math.sqrt((52.5 - x_flipped) ** 2 + y_flipped**2)
-            theta = math.atan2(y_flipped, (52.5 - x_flipped))
-            delta_x = x_flipped - ball_x
-            delta_y = y_flipped - ball_y
-            dist_ball = math.sqrt(delta_x**2 + delta_y**2)
-            angle_ball = math.atan2(delta_x, delta_y)
-            roster = lookup.get(jersey, {})
-            rel = {
-                "jerseyNum": jersey,
-                "r": r,
-                "theta": theta,
-                "dist_ball": dist_ball,
-                "angle_ball": angle_ball,
-                "position": roster.get("position"),
-            }
-            attacks.at[frame, team_key].append(rel)
+        def player_relatives(
+            players: list[dict[str, Any]] | None,
+            lookup: dict[int, dict[str, Any]],
+            defender_side: bool,
+        ) -> list[dict[str, Any]]:
+            nonlocal gk_r, gk_theta
+            relatives: list[dict[str, Any]] = []
+            for player in players or []:
+                jersey = safe_int(player.get("jerseyNum"))
+                x_raw = player.get("x")
+                y_raw = player.get("y")
+                if jersey is None or x_raw is None or y_raw is None:
+                    continue
+                x_flipped = float(x_raw) * flip
+                y_flipped = float(y_raw) * flip
+                r = math.sqrt((goal_x - x_flipped) ** 2 + y_flipped**2)
+                theta = math.atan2(y_flipped, (goal_x - x_flipped))
+                delta_x = x_flipped - ball_x
+                delta_y = y_flipped - ball_y
+                dist_ball = math.sqrt(delta_x**2 + delta_y**2)
+                angle_ball = math.atan2(delta_x, delta_y)
+                roster = lookup.get(jersey, {})
+                rel = {
+                    "jerseyNum": jersey,
+                    "r": r,
+                    "theta": theta,
+                    "dist_ball": dist_ball,
+                    "angle_ball": angle_ball,
+                    "position": roster.get("position"),
+                }
 
-            if not defender_side:
-                return
-            if rel["position"] == "GK":
-                attacks.at[frame, "GK_r"] = r
-                attacks.at[frame, "GK_theta"] = theta
-                attacks.at[frame, team_key].pop()
-                return
-            if ball_x > x_flipped:
-                return
-            l, r2 = tangent_inter(x_flipped, y_flipped, ball_x, ball_y, 0.375, 52.5)
-            lo = max(l, -9.16)
-            hi = min(r2, 9.16)
-            if lo <= hi:
-                cover_l.append(lo)
-                cover_r.append(hi)
+                if defender_side:
+                    if rel["position"] == "GK":
+                        gk_r = r
+                        gk_theta = theta
+                        continue
+                    if ball_x <= x_flipped:
+                        left, right = tangent_inter(
+                            x_flipped,
+                            y_flipped,
+                            ball_x,
+                            ball_y,
+                            PLAYER_BLOCK_RADIUS,
+                            goal_x,
+                        )
+                        lo = max(left, -OPEN_GOAL_HALF_WIDTH)
+                        hi = min(right, OPEN_GOAL_HALF_WIDTH)
+                        if lo <= hi:
+                            cover_l.append(lo)
+                            cover_r.append(hi)
 
-        for player in attacks.at[frame, "homePlayersSmoothed"] or []:
-            add_player("homePlayersRelative", player, home_lookup, defender_side=not atk_home)
-        for player in attacks.at[frame, "awayPlayersSmoothed"] or []:
-            add_player("awayPlayersRelative", player, away_lookup, defender_side=atk_home)
+                relatives.append(rel)
+            return sorted(relatives, key=lambda x: x["dist_ball"])
 
-        marks = [-9.16, 9.16]
+        home_relatives = player_relatives(home_players, home_lookup, defender_side=not atk_home)
+        away_relatives = player_relatives(away_players, away_lookup, defender_side=atk_home)
+
+        marks = [-OPEN_GOAL_HALF_WIDTH, OPEN_GOAL_HALF_WIDTH]
         for i in range(len(cover_l)):
             marks.extend([cover_l[i], cover_r[i]])
         marks = sorted(set(marks))
@@ -212,60 +275,40 @@ def compute_frame_features(attacks: pd.DataFrame, home_lookup: dict[int, dict[st
             while seg < len(intervals) and intervals[seg][0] <= pos:
                 pos = max(pos, intervals[seg][1])
                 seg += 1
-        open_goal = (covered + (marks[-1] - marks[pos])) / 18.32
-        attacks.at[frame, "openGoal"] = open_goal
+        open_goal = (covered + (marks[-1] - marks[pos])) / GOAL_AREA_WIDTH
 
-        attacks.at[frame, "homePlayersRelative"] = sorted(
-            attacks.at[frame, "homePlayersRelative"], key=lambda x: x["dist_ball"]
-        )
-        attacks.at[frame, "awayPlayersRelative"] = sorted(
-            attacks.at[frame, "awayPlayersRelative"], key=lambda x: x["dist_ball"]
-        )
+        home_relative_rows.append(home_relatives)
+        away_relative_rows.append(away_relatives)
+        gk_r_values.append(gk_r)
+        gk_theta_values.append(gk_theta)
+        open_goal_values.append(open_goal)
 
-    def get_metric(row: pd.Series, side: str, idx: int, key: str) -> float:
-        players = row[side]
+    attacks["homePlayersRelative"] = home_relative_rows
+    attacks["awayPlayersRelative"] = away_relative_rows
+    attacks["GK_r"] = gk_r_values
+    attacks["GK_theta"] = gk_theta_values
+    attacks["openGoal"] = open_goal_values
+
+    def get_metric(players: list[dict[str, Any]], idx: int, key: str) -> float:
         if idx < 0 or idx >= len(players):
             return np.nan
         value = players[idx].get(key)
         return float(value) if value is not None else np.nan
 
+    is_home_values = [bool(value) for value in attacks["is_home"].tolist()]
     for i in range(5):
-        attacks[f"DefDist{i}"] = attacks.apply(
-            lambda row: get_metric(
-                row,
-                "awayPlayersRelative" if bool(row["is_home"]) else "homePlayersRelative",
-                i,
-                "dist_ball",
-            ),
-            axis=1,
-        )
-        attacks[f"DefAngle{i}"] = attacks.apply(
-            lambda row: get_metric(
-                row,
-                "awayPlayersRelative" if bool(row["is_home"]) else "homePlayersRelative",
-                i,
-                "angle_ball",
-            ),
-            axis=1,
-        )
-        attacks[f"OffDist{i}"] = attacks.apply(
-            lambda row: get_metric(
-                row,
-                "homePlayersRelative" if bool(row["is_home"]) else "awayPlayersRelative",
-                i + 1,
-                "dist_ball",
-            ),
-            axis=1,
-        )
-        attacks[f"OffAngle{i}"] = attacks.apply(
-            lambda row: get_metric(
-                row,
-                "homePlayersRelative" if bool(row["is_home"]) else "awayPlayersRelative",
-                i + 1,
-                "angle_ball",
-            ),
-            axis=1,
-        )
+        defenders = [
+            away_relatives if is_home else home_relatives
+            for is_home, home_relatives, away_relatives in zip(is_home_values, home_relative_rows, away_relative_rows)
+        ]
+        attackers = [
+            home_relatives if is_home else away_relatives
+            for is_home, home_relatives, away_relatives in zip(is_home_values, home_relative_rows, away_relative_rows)
+        ]
+        attacks[f"DefDist{i}"] = [get_metric(players, i, "dist_ball") for players in defenders]
+        attacks[f"DefAngle{i}"] = [get_metric(players, i, "angle_ball") for players in defenders]
+        attacks[f"OffDist{i}"] = [get_metric(players, i + 1, "dist_ball") for players in attackers]
+        attacks[f"OffAngle{i}"] = [get_metric(players, i + 1, "angle_ball") for players in attackers]
     return attacks
 
 
@@ -280,6 +323,7 @@ def process_one_game(
 ) -> tuple[str, int, str]:
     df = parse_tracking_jsonl(tracking_path)
     meta = load_json(metadata_path)
+    pitch = active_pitch_dimensions(meta if isinstance(meta, dict) else {})
     rosters = pd.DataFrame(load_json(rosters_path))
 
     if df.empty:
@@ -294,9 +338,7 @@ def process_one_game(
     if df.empty:
         return game, 0, "no_in_play"
 
-    df["is_home"] = df["game_event"].apply(
-        lambda x: None if x is None or x.get("game_event_type") != "OTB" else x.get("home_ball")
-    )
+    df["is_home"] = compute_possession_side(df)
     df["period"] = df["period"].astype(float) - 1
 
     home_start_left = bool(meta.get("homeTeamStartLeft", False))
@@ -314,7 +356,7 @@ def process_one_game(
         df[axis] = df[axis].interpolate(method="linear")
         df[axis] = df[axis].ffill().bfill()
 
-    third_x = 52.5 - 105 / 3
+    third_x = pitch.length / 2.0 - pitch.length / 3.0
     attack_counter = 0
     current_side = -1
     attack_ids = [0] * len(df)
@@ -324,21 +366,26 @@ def process_one_game(
             return False
         return ball_x > -third_x if int(atk_dir) == 1 else ball_x < third_x
 
+    def side_value(value: Any) -> int | None:
+        if value is None or pd.isna(value):
+            return None
+        return int(bool(value))
+
     for i in range(len(df)):
         bx = float(df.at[i, "x"])
-        is_home = df.at[i, "is_home"]
+        side = side_value(df.at[i, "is_home"])
         atk_dir = df.at[i, "attack_direction"]
         if current_side == 1:
-            if not is_home or cleared(bx, atk_dir):
+            if side == 0 or cleared(bx, atk_dir):
                 current_side = -1
         elif current_side == 0:
-            if is_home or cleared(bx, atk_dir):
+            if side == 1 or cleared(bx, atk_dir):
                 current_side = -1
         else:
-            if is_home is not None and not pd.isna(atk_dir):
+            if side is not None and not pd.isna(atk_dir):
                 in_zone = (int(atk_dir) == 1 and bx <= -third_x) or (int(atk_dir) == 0 and bx >= third_x)
                 if in_zone:
-                    current_side = int(bool(is_home))
+                    current_side = side
                     attack_counter += 1
         if current_side >= 0:
             attack_ids[i] = attack_counter
@@ -374,12 +421,14 @@ def process_one_game(
 
     attacks["x_flipped"] = attacks["x"] * (1 - 2 * attacks["attack_direction"].fillna(0).astype(int))
     attacks["y_flipped"] = attacks["y"] * (1 - 2 * attacks["attack_direction"].fillna(0).astype(int))
-    attacks["r"] = np.sqrt((52.5 - attacks["x_flipped"]) ** 2 + attacks["y_flipped"] ** 2)
-    attacks["theta"] = np.arctan2(attacks["y_flipped"], (52.5 - attacks["x_flipped"]))
+    goal_x = pitch.length / 2.0
+    attacks["r"] = np.sqrt((goal_x - attacks["x_flipped"]) ** 2 + attacks["y_flipped"] ** 2)
+    attacks["theta"] = np.arctan2(attacks["y_flipped"], (goal_x - attacks["x_flipped"]))
     attacks["time_s"] = attacks["videoTimeMs"] / 1000.0
-    dx = attacks["x"].diff()
-    dy = attacks["y"].diff()
-    dt = attacks["time_s"].diff()
+    grouped_attack = attacks.groupby(["period", "attack"], dropna=False)
+    dx = grouped_attack["x"].diff()
+    dy = grouped_attack["y"].diff()
+    dt = grouped_attack["time_s"].diff()
     speed = np.sqrt(dx**2 + dy**2) / dt
     attacks["speed"] = speed.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
@@ -387,11 +436,14 @@ def process_one_game(
     away_team = meta.get("awayTeam", {}) if isinstance(meta, dict) else {}
     home_lookup = build_roster_lookup(rosters[rosters["team"].apply(lambda x: str(x.get("id")) == str(home_team.get("id")))])
     away_lookup = build_roster_lookup(rosters[rosters["team"].apply(lambda x: str(x.get("id")) == str(away_team.get("id")))])
-    attacks = compute_frame_features(attacks, home_lookup, away_lookup)
+    attacks = compute_frame_features(attacks, home_lookup, away_lookup, pitch)
 
     attacks["competition"] = competition
     attacks["season"] = season
     attacks["game"] = game
+    attacks["pitch_id"] = pitch.pitch_id
+    attacks["pitch_length"] = pitch.length
+    attacks["pitch_width"] = pitch.width
 
     drop_cols = [
         "version",
@@ -416,6 +468,22 @@ def process_one_game(
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"atk_{competition}_{season}_{game}.pkl.bz2"
     kept.to_pickle(out_path, compression="bz2")
+    sidecar_path(out_path).write_text(
+        json.dumps(
+            {
+                "extraction_version": EXTRACTION_VERSION,
+                "competition": competition,
+                "season": season,
+                "game": game,
+                "rows": int(len(kept)),
+                "pitch_id": pitch.pitch_id,
+                "pitch_length": pitch.length,
+                "pitch_width": pitch.width,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return game, len(kept), "ok"
 
 
@@ -430,7 +498,7 @@ def main() -> None:
     tasks: list[tuple[str, Path, Path, Path]] = []
     for game, tracking_path, metadata_path, rosters_path in entries:
         out_path = args.output_dir / f"atk_{args.competition}_{args.season}_{game}.pkl.bz2"
-        if args.skip_existing and out_path.exists():
+        if args.skip_existing and output_is_current(out_path, "extraction_version", EXTRACTION_VERSION):
             continue
         tasks.append((game, tracking_path, metadata_path, rosters_path))
 

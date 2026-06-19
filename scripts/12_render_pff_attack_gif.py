@@ -24,6 +24,7 @@ from typing import Any
 
 import pandas as pd
 from PIL import Image, ImageDraw
+from pitch_geometry import active_pitch_dimensions
 
 
 def load_render_helpers():
@@ -45,6 +46,7 @@ draw_players = _render_helpers.draw_players
 draw_sparkline_panel = _render_helpers.draw_sparkline_panel
 draw_text = _render_helpers.draw_text
 load_font = _render_helpers.load_font
+pitch_from_data = _render_helpers.pitch_from_data
 
 
 def prediction_rows(predictions_path: Path, game: int, attack: int) -> pd.DataFrame:
@@ -67,7 +69,12 @@ def prediction_rows(predictions_path: Path, game: int, attack: int) -> pd.DataFr
         "goal_proba",
         "is_goal",
     ]
-    df = pd.read_csv(predictions_path, usecols=usecols)
+    optional = ["pitch_id", "pitch_length", "pitch_width"]
+    available = set(pd.read_csv(predictions_path, nrows=0).columns)
+    missing = [col for col in usecols if col not in available]
+    if missing:
+        raise ValueError(f"Predictions file is missing required columns: {', '.join(missing)}")
+    df = pd.read_csv(predictions_path, usecols=[col for col in usecols + optional if col in available])
     df = df[(df["game"].astype(int) == game) & (df["attack_merged"].astype(int) == attack)].copy()
     if df.empty:
         raise ValueError(f"No predictions found for game={game}, attack_merged={attack} in {predictions_path}")
@@ -311,8 +318,8 @@ def render_frame(
     draw_metric_box(draw, ticker_x + 408, ticker_y, "cum xG+", float(row["cum_xG_plus"]), COLORS["cumulative"], fonts["tiny"], fonts["metric"])
 
     pitch_box = (34, 104, width - 34, 610)
-    draw_pitch(draw, pitch_box)
-    draw_players(draw, tracking_by_frame.get(frame_num, pd.DataFrame()), pitch_box, fonts["jersey"], team_styles)
+    draw_pitch(draw, pitch_box, args.pitch)
+    draw_players(draw, tracking_by_frame.get(frame_num, pd.DataFrame()), pitch_box, fonts["jersey"], team_styles, pitch=args.pitch)
 
     if not pd.isna(row.get("player_name")):
         draw.rounded_rectangle([48, 622, 330, 650], radius=8, fill=(255, 255, 255), outline=(226, 230, 224), width=1)
@@ -366,9 +373,12 @@ def main() -> None:
     tracking_path, metadata_path, roster_path = tracking_paths(args.tracking_root, args.game)
     metadata = load_metadata(metadata_path)
     team_styles = team_styles_from_metadata(metadata)
+    args.pitch = active_pitch_dimensions(metadata) if metadata else pitch_from_data(metric, pd.DataFrame(), None, None)
     if metadata.get("stadium", {}).get("pitches"):
-        pitch = metadata["stadium"]["pitches"][0]
-        print(f"Using tracking pitch dimensions from metadata: {pitch.get('length')} x {pitch.get('width')}")
+        print(
+            "Using active tracking pitch dimensions from metadata: "
+            f"{args.pitch.length} x {args.pitch.width}"
+        )
     if metadata.get("homeTeam") and metadata.get("awayTeam"):
         print(
             "Team colors: "

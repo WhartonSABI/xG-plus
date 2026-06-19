@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,9 @@ def parse_args() -> argparse.Namespace:
 
 def import_matplotlib():
     try:
+        cache_dir = Path(tempfile.gettempdir()) / "xgplus-matplotlib-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(cache_dir))
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt

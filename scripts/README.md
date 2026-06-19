@@ -29,3 +29,29 @@ python scripts/run_pipeline.py --competition pl --season 2024-2025 --workers 8 -
 Use `--run-scrapers` only when AWS credentials are configured and you want to refresh the raw mirrors. The default run assumes raw files already exist locally.
 
 The shot model target defaults to `hasShotsIn1s`: a frame is positive when the same attacking side takes a shot within the next second of the same merged attack. Exact shot rows are also retained as `is_shot`; goal rows are retained as `is_goal`.
+
+To run only raw validation, attack extraction, feature engineering, event labeling, and chunk export, stop before fitting probability models:
+
+```bash
+python scripts/run_pipeline.py --competition pl --seasons 2022-2023 2023-2024 2024-2025 --workers 8 --preprocess-only --skip-existing
+```
+
+`--skip-existing` reuses existing per-game attack and merged CSV files only when their sidecar metadata matches the current extraction/labeling logic. Outputs from older logic, interrupted runs, or missing sidecars are regenerated.
+
+For a 12-core terminal run across all local PL seasons:
+
+```bash
+scripts/run_preprocessing_12core.sh
+```
+
+To resume and opt out of already-created per-game files:
+
+```bash
+scripts/run_preprocessing_12core.sh --skip-existing
+```
+
+## Pitch Geometry
+
+Tracking coordinates are treated as native PFF metric coordinates for each match, not rescaled to a standard field. Step 04 resolves the active `metadata.json` stadium pitch record by match date and uses that pitch length for final-third entry, distance to goal, and shot angle features. Step 05 carries `pitch_id`, `pitch_length`, and `pitch_width` into merged training rows, and prediction/export/render steps preserve those columns for diagnostics and visuals.
+
+After changing pitch geometry logic, rerun step 04 and downstream steps without `--skip-existing` so old processed feature files are refreshed.

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pitch_geometry import GOAL_HALF_WIDTH, active_pitch_dimensions
 
 
 REQUESTED_ATTACKS = {212, 226, 268, 285, 340, 408}
@@ -120,9 +121,11 @@ def goal_line_cross_time(
     pff_period: int,
     shot_time: float,
     scan_seconds: float,
+    pitch_length: float,
 ) -> float | None:
     """Return first clock where ball appears across either goal line after shot."""
     end_scan = shot_time + scan_seconds
+    goal_x = pitch_length / 2.0
     with bz2.open(tracking_path, "rt", encoding="utf-8") as fh:
         for line in fh:
             if not line.strip():
@@ -140,8 +143,7 @@ def goal_line_cross_time(
             if xy is None:
                 continue
             x, y = xy
-            # Pitch x spans roughly [-52.5, 52.5]. Goal mouth y span is about [-3.66, 3.66].
-            if abs(x) >= 52.4 and abs(y) <= 3.8:
+            if abs(x) >= goal_x - 0.1 and abs(y) <= GOAL_HALF_WIDTH + 0.15:
                 return clock
     return None
 
@@ -156,6 +158,7 @@ def export_tracking(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     metadata = load_json(metadata_path)
     rosters = load_json(roster_path)
+    pitch = active_pitch_dimensions(metadata)
     names = roster_name_map(rosters, metadata)
     rows: list[dict[str, Any]] = []
     frames: list[dict[str, Any]] = []
@@ -182,7 +185,11 @@ def export_tracking(
                 rows.append(ball)
     if not rows:
         raise ValueError(f"No tracking rows in {tracking_path} for period {pff_period} {start_time}-{end_time}")
-    return pd.DataFrame(rows), pd.DataFrame(frames).drop_duplicates().sort_values("periodGameClockTime")
+    tracking = pd.DataFrame(rows)
+    tracking["pitch_id"] = pitch.pitch_id
+    tracking["pitch_length"] = pitch.length
+    tracking["pitch_width"] = pitch.width
+    return tracking, pd.DataFrame(frames).drop_duplicates().sort_values("periodGameClockTime")
 
 
 def add_nearest_frame(metric: pd.DataFrame, frames: pd.DataFrame) -> pd.DataFrame:
@@ -283,6 +290,8 @@ def main() -> None:
             )
 
         tracking_path, metadata_path, roster_path = tracking_paths(args.tracking_root, game)
+        metadata = load_json(metadata_path)
+        pitch = active_pitch_dimensions(metadata)
         pff_period = int(metric["period"].iloc[0]) + 1
 
         goal_rows = metric[metric["is_goal"].astype(str).str.lower().isin({"true", "1"})]
@@ -294,6 +303,7 @@ def main() -> None:
                 pff_period=pff_period,
                 shot_time=shot_time,
                 scan_seconds=args.goal_line_scan_seconds,
+                pitch_length=pitch.length,
             )
             if cross_time is not None:
                 end_time = max(end_time, cross_time + args.post_goal_line_seconds)
@@ -324,6 +334,15 @@ def main() -> None:
         metric["xG_plus"] = metric["goal_proba"]
         metric["int_sec"] = metric["periodGameClockTime"].astype(int)
         metric["gameId"] = metric["game"]
+        if "pitch_id" not in metric.columns:
+            metric["pitch_id"] = pitch.pitch_id
+        elif pitch.pitch_id is not None:
+            metric["pitch_id"] = metric["pitch_id"].fillna(pitch.pitch_id)
+        for col, value in [("pitch_length", pitch.length), ("pitch_width", pitch.width)]:
+            if col not in metric.columns:
+                metric[col] = value
+            else:
+                metric[col] = pd.to_numeric(metric[col], errors="coerce").fillna(value)
         if "competition" not in metric.columns:
             metric["competition"] = "pl"
         if "season" not in metric.columns:

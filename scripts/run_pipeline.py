@@ -14,11 +14,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tracking-root", type=Path, default=Path("pff-tracking"))
     parser.add_argument("--event-root", type=Path, default=Path("pff-events"))
     parser.add_argument("--competition", default="pl")
-    parser.add_argument("--season", default="2024-2025")
+    parser.add_argument("--season", default="2024-2025", help="Single season to process; ignored when --seasons is set.")
+    parser.add_argument("--seasons", nargs="+", default=None, help="Process multiple seasons, e.g. 2022-2023 2023-2024.")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--chunk-size", type=int, default=20)
     parser.add_argument("--limit-games", type=int, default=0)
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--preprocess-only",
+        action="store_true",
+        help="Run through extraction and event labeling, then stop before model fitting.",
+    )
     parser.add_argument("--allow-missing-events", action="store_true")
     parser.add_argument("--run-scrapers", action="store_true", help="Mirror raw event/tracking data before validating.")
     parser.add_argument("--skip-env-check", action="store_true")
@@ -28,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-evaluate", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
     parser.add_argument("--shot-target", default="hasShotsIn1s")
+    parser.add_argument("--min-shot-rows", type=int, default=100)
     parser.add_argument("--process-dir", type=Path, default=Path("data/process_games"))
     parser.add_argument("--merged-games-dir", type=Path, default=Path("data/merged_games"))
     parser.add_argument("--merged-dir", type=Path, default=Path("data/merged_data"))
@@ -47,10 +54,16 @@ def run(cmd: list[str]) -> None:
 def main() -> None:
     args = parse_args()
     scripts_dir = Path(__file__).resolve().parent
-    if args.predictions_path is None:
-        args.predictions_path = Path("data/predictions") / f"predictions_{args.competition}_{args.season}.csv"
-    if args.shots_path is None:
-        args.shots_path = Path("data/predictions") / f"shots_{args.competition}_{args.season}.csv"
+    seasons = args.seasons or [args.season]
+
+    if args.preprocess_only:
+        args.skip_train = True
+        args.skip_predict = True
+        args.skip_evaluate = True
+        args.skip_plots = True
+
+    if len(seasons) > 1 and not args.preprocess_only and (args.predictions_path is not None or args.shots_path is not None):
+        raise SystemExit("--predictions-path and --shots-path are only supported with one season unless --preprocess-only is used.")
 
     if not args.skip_env_check:
         env_cmd = [
@@ -75,7 +88,7 @@ def main() -> None:
                 "--competition",
                 args.competition,
                 "--seasons",
-                args.season,
+                *seasons,
                 "--workers",
                 str(args.workers),
             ]
@@ -89,7 +102,7 @@ def main() -> None:
                 "--competition",
                 args.competition,
                 "--seasons",
-                args.season,
+                *seasons,
                 "--workers",
                 str(args.workers),
             ]
@@ -107,133 +120,140 @@ def main() -> None:
                 "--competition",
                 args.competition,
                 "--seasons",
-                args.season,
+                *seasons,
             ]
         )
 
-    extract_cmd = [
-        sys.executable,
-        str(scripts_dir / "04_extract_attacks.py"),
-        "--tracking-root",
-        str(args.tracking_root),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-        "--workers",
-        str(args.workers),
-        "--output-dir",
-        str(args.process_dir),
-    ]
-    if args.limit_games > 0:
-        extract_cmd += ["--limit-games", str(args.limit_games)]
-    if args.skip_existing:
-        extract_cmd.append("--skip-existing")
+    for season in seasons:
+        predictions_path = args.predictions_path or Path("data/predictions") / f"predictions_{args.competition}_{season}.csv"
+        shots_path = args.shots_path or Path("data/predictions") / f"shots_{args.competition}_{season}.csv"
 
-    label_cmd = [
-        sys.executable,
-        str(scripts_dir / "05_merge_events_and_label_frames.py"),
-        "--process-dir",
-        str(args.process_dir),
-        "--tracking-root",
-        str(args.tracking_root),
-        "--event-root",
-        str(args.event_root),
-        "--output-dir",
-        str(args.merged_games_dir),
-        "--chunk-dir",
-        str(args.merged_dir),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-        "--chunk-size",
-        str(args.chunk_size),
-        "--workers",
-        str(args.workers),
-    ]
-    if args.allow_missing_events:
-        label_cmd.append("--allow-missing-events")
-    if args.skip_existing:
-        label_cmd.append("--skip-existing")
+        extract_cmd = [
+            sys.executable,
+            str(scripts_dir / "04_extract_attacks.py"),
+            "--tracking-root",
+            str(args.tracking_root),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+            "--workers",
+            str(args.workers),
+            "--output-dir",
+            str(args.process_dir),
+        ]
+        if args.limit_games > 0:
+            extract_cmd += ["--limit-games", str(args.limit_games)]
+        if args.skip_existing:
+            extract_cmd.append("--skip-existing")
 
-    train_cmd = [
-        sys.executable,
-        str(scripts_dir / "06_train_xgboost_models.py"),
-        "--merged-dir",
-        str(args.merged_dir),
-        "--models-dir",
-        str(args.models_dir),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-        "--shot-target",
-        args.shot_target,
-    ]
+        label_cmd = [
+            sys.executable,
+            str(scripts_dir / "05_merge_events_and_label_frames.py"),
+            "--process-dir",
+            str(args.process_dir),
+            "--tracking-root",
+            str(args.tracking_root),
+            "--event-root",
+            str(args.event_root),
+            "--output-dir",
+            str(args.merged_games_dir),
+            "--chunk-dir",
+            str(args.merged_dir),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+            "--chunk-size",
+            str(args.chunk_size),
+            "--workers",
+            str(args.workers),
+        ]
+        if args.allow_missing_events:
+            label_cmd.append("--allow-missing-events")
+        if args.skip_existing:
+            label_cmd.append("--skip-existing")
 
-    predict_cmd = [
-        sys.executable,
-        str(scripts_dir / "07_predict_xgplus.py"),
-        "--merged-dir",
-        str(args.merged_dir),
-        "--models-dir",
-        str(args.models_dir),
-        "--predictions-path",
-        str(args.predictions_path),
-        "--shots-path",
-        str(args.shots_path),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-    ]
+        train_cmd = [
+            sys.executable,
+            str(scripts_dir / "06_train_xgboost_models.py"),
+            "--merged-dir",
+            str(args.merged_dir),
+            "--models-dir",
+            str(args.models_dir),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+            "--shot-target",
+            args.shot_target,
+            "--min-shot-rows",
+            str(args.min_shot_rows),
+        ]
 
-    evaluate_cmd = [
-        sys.executable,
-        str(scripts_dir / "08_evaluate_models.py"),
-        "--predictions",
-        str(args.predictions_path),
-        "--models-dir",
-        str(args.models_dir),
-        "--output-dir",
-        str(args.evaluation_dir),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-        "--shot-target",
-        args.shot_target,
-    ]
+        predict_cmd = [
+            sys.executable,
+            str(scripts_dir / "07_predict_xgplus.py"),
+            "--merged-dir",
+            str(args.merged_dir),
+            "--models-dir",
+            str(args.models_dir),
+            "--predictions-path",
+            str(predictions_path),
+            "--shots-path",
+            str(shots_path),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+        ]
 
-    plots_cmd = [
-        sys.executable,
-        str(scripts_dir / "09_make_model_plots.py"),
-        "--predictions",
-        str(args.predictions_path),
-        "--models-dir",
-        str(args.models_dir),
-        "--output-dir",
-        str(args.plots_dir),
-        "--competition",
-        args.competition,
-        "--season",
-        args.season,
-        "--shot-target",
-        args.shot_target,
-    ]
+        evaluate_cmd = [
+            sys.executable,
+            str(scripts_dir / "08_evaluate_models.py"),
+            "--predictions",
+            str(predictions_path),
+            "--models-dir",
+            str(args.models_dir),
+            "--output-dir",
+            str(args.evaluation_dir),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+            "--shot-target",
+            args.shot_target,
+        ]
 
-    run(extract_cmd)
-    run(label_cmd)
-    if not args.skip_train:
-        run(train_cmd)
-    if not args.skip_predict:
-        run(predict_cmd)
-    if not args.skip_evaluate:
-        run(evaluate_cmd)
-    if not args.skip_plots:
-        run(plots_cmd)
-    print("xG+ pipeline complete.")
+        plots_cmd = [
+            sys.executable,
+            str(scripts_dir / "09_make_model_plots.py"),
+            "--predictions",
+            str(predictions_path),
+            "--models-dir",
+            str(args.models_dir),
+            "--output-dir",
+            str(args.plots_dir),
+            "--competition",
+            args.competition,
+            "--season",
+            season,
+            "--shot-target",
+            args.shot_target,
+        ]
+
+        run(extract_cmd)
+        run(label_cmd)
+        if not args.skip_train:
+            run(train_cmd)
+        if not args.skip_predict:
+            run(predict_cmd)
+        if not args.skip_evaluate:
+            run(evaluate_cmd)
+        if not args.skip_plots:
+            run(plots_cmd)
+
+    print("xG+ preprocessing complete." if args.preprocess_only else "xG+ pipeline complete.")
 
 
 if __name__ == "__main__":

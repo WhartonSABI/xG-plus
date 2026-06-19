@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from pitch_geometry import active_pitch_dimensions
 try:
     from tqdm import tqdm
 except ImportError:  # pragma: no cover
@@ -37,6 +38,9 @@ METAS = [
     "away_name",
     "competition",
     "season",
+    "pitch_id",
+    "pitch_length",
+    "pitch_width",
     "attack",
     "attack_merged",
     "period",
@@ -54,6 +58,9 @@ for i in range(5):
     FEATURES.append(f"DefAngle{i}")
     FEATURES.append(f"OffDist{i}")
     FEATURES.append(f"OffAngle{i}")
+
+
+LABEL_VERSION = "event-label-v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,6 +99,21 @@ def load_json(path: Path) -> dict[str, Any] | list[Any]:
         return json.load(fh)
 
 
+def sidecar_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.metadata.json")
+
+
+def output_is_current(path: Path, version_key: str, version: str) -> bool:
+    meta_path = sidecar_path(path)
+    if not path.exists() or not meta_path.exists():
+        return False
+    try:
+        metadata = load_json(meta_path)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(metadata, dict) and metadata.get(version_key) == version
+
+
 def merge_attacks(atk: pd.DataFrame) -> pd.DataFrame:
     tmp = (
         atk.groupby(["game", "attack", "is_home"], dropna=False)
@@ -103,11 +125,11 @@ def merge_attacks(atk: pd.DataFrame) -> pd.DataFrame:
     tmp["attack_merged"] = tmp["attack"]
     for i in range(1, len(tmp)):
         same_game = tmp.at[i, "game"] == tmp.at[i - 1, "game"]
-        same_side = bool(tmp.at[i, "is_home"]) == bool(tmp.at[i - 1, "is_home"])
+        same_side = tmp.at[i, "is_home"] == tmp.at[i - 1, "is_home"]
         close_gap = tmp.at[i, "start_time"] - tmp.at[i - 1, "end_time"] <= 5000
         if same_game and same_side and close_gap:
             tmp.at[i, "attack_merged"] = tmp.at[i - 1, "attack_merged"]
-    return atk.merge(tmp[["game", "attack", "attack_merged"]], on=["game", "attack"], how="left")
+    return atk.merge(tmp[["game", "attack", "is_home", "attack_merged"]], on=["game", "attack", "is_home"], how="left")
 
 
 def build_roster_lookup(rosters: list[dict[str, Any]], team_id: str) -> dict[int, dict[str, Any]]:
@@ -207,6 +229,7 @@ def add_player_and_match_meta(
 ) -> pd.DataFrame:
     home_team = metadata.get("homeTeam", {}) or {}
     away_team = metadata.get("awayTeam", {}) or {}
+    pitch = active_pitch_dimensions(metadata)
     home_lookup = build_roster_lookup(rosters, str(home_team.get("id")))
     away_lookup = build_roster_lookup(rosters, str(away_team.get("id")))
 
@@ -231,6 +254,9 @@ def add_player_and_match_meta(
     atk["home_name"] = home_team.get("name")
     atk["away_id"] = str(away_team.get("id"))
     atk["away_name"] = away_team.get("name")
+    atk["pitch_id"] = pitch.pitch_id
+    atk["pitch_length"] = pitch.length
+    atk["pitch_width"] = pitch.width
     return atk
 
 
@@ -271,6 +297,20 @@ def process_one_file(
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"train_{competition}_{season}_{game}.csv"
     out.to_csv(out_path, index=False)
+    sidecar_path(out_path).write_text(
+        json.dumps(
+            {
+                "label_version": LABEL_VERSION,
+                "competition": competition,
+                "season": season,
+                "game": game,
+                "rows": int(len(out)),
+                "source": str(process_file),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return process_file.name, len(out), "ok"
 
 
@@ -300,7 +340,7 @@ def main() -> None:
     for path in process_files:
         game = path.name.removesuffix(".pkl.bz2").split("_")[-1]
         out_path = args.output_dir / f"train_{args.competition}_{args.season}_{game}.csv"
-        if args.skip_existing and out_path.exists():
+        if args.skip_existing and output_is_current(out_path, "label_version", LABEL_VERSION):
             continue
         tasks.append(path)
 

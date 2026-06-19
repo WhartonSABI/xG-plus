@@ -12,10 +12,9 @@
 *.tex
 
 # internal files
+archived/
 internal/
-paul*
 pff*
-sagemaker/
 sample-data/
 data/
 archived/local/

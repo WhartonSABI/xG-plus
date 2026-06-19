@@ -9,7 +9,6 @@ paper, raw PFF mirrors, and a local modeling pipeline.
 
 ```
 .
-├── archived/                      # Legacy notebooks and reference code
 ├── asis2026/                      # ASIS 2026 presentation files
 │   ├── figures/
 │   └── presentation.pptx
