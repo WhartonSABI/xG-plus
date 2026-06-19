@@ -2,23 +2,20 @@
 
 #### Authors: Jonathan Pipping-Gamón, Tianshu Feng, and Paul Sabin
 
-This repository contains materials for the xG+ project, including our
-slides, paper, and supporting code.
+This repository contains materials for the xG+ project, including slides,
+paper, raw PFF mirrors, and a local modeling pipeline.
 
 ## Directory Structure
 
 ```
 .
-├── asi2026/                       # ASI 2026 presentation files
+├── archived/                      # Legacy notebooks and reference code
+├── asis2026/                      # ASIS 2026 presentation files
 │   ├── figures/
 │   └── presentation.pptx
-├── code/                          # Modeling, analysis, and plots
-│   ├── all-season_model.ipynb
-│   ├── baseline.ipynb
-│   ├── multigame.py
-│   ├── plots.ipynb
-│   ├── README.md                  # Details for code notebooks
-│   └── stability_test.ipynb
+├── pff-events/                    # Raw event CSV mirror
+├── pff-tracking/                  # Raw tracking JSONL/metadata/roster mirror
+├── scripts/                       # Numbered scrape -> features -> labels -> XGBoost pipeline
 ├── jsm2025/                       # JSM 2025 presentation files
 │   ├── figures/
 │   └── presentation.pptx
@@ -26,3 +23,11 @@ slides, paper, and supporting code.
     ├── figures/
     └── paper.pdf
 ```
+
+Run the local pipeline from the repository root:
+
+```bash
+python scripts/run_pipeline.py --competition pl --season 2024-2025 --workers 8 --skip-existing
+```
+
+See `scripts/README.md` for the step-by-step order and outputs.

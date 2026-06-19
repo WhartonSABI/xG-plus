@@ -17,7 +17,8 @@ paul*
 pff*
 sagemaker/
 sample-data/
-scripts/
+data/
+archived/local/
 xg-data/
 
 ##############
