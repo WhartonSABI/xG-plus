@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("data/evaluation"))
     parser.add_argument("--competition", default="pl")
     parser.add_argument("--season", default="2024-2025")
+    parser.add_argument("--model-id", default=None, help="Model label used for metadata; defaults to --season.")
     parser.add_argument("--shot-target", default=None)
     return parser.parse_args()
 
@@ -68,7 +69,8 @@ def resolve_predictions_path(args: argparse.Namespace) -> Path:
 
 
 def read_model_shot_target(args: argparse.Namespace) -> str | None:
-    metadata_path = args.models_dir / f"model_metadata_{args.competition}_{args.season}.json"
+    model_label = args.model_id or args.season
+    metadata_path = args.models_dir / f"model_metadata_{args.competition}_{model_label}.json"
     if not metadata_path.exists():
         return None
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -126,6 +128,7 @@ def main() -> None:
     metrics: dict[str, Any] = {
         "competition": args.competition,
         "season": args.season,
+        "model_id": args.model_id or args.season,
         "predictions": str(predictions_path),
         "rows": int(len(predictions)),
         "shot_target": shot_target,

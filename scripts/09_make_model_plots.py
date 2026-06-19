@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("data/plots"))
     parser.add_argument("--competition", default="pl")
     parser.add_argument("--season", default="2024-2025")
+    parser.add_argument("--model-id", default=None, help="Model label used for metadata and importance plots; defaults to --season.")
     parser.add_argument("--shot-target", default=None)
     parser.add_argument("--bins", type=int, default=10)
     parser.add_argument("--top-features", type=int, default=20)
@@ -58,7 +59,8 @@ def resolve_predictions_path(args: argparse.Namespace) -> Path:
 
 
 def read_metadata(args: argparse.Namespace) -> dict[str, Any]:
-    path = args.models_dir / f"model_metadata_{args.competition}_{args.season}.json"
+    model_label = args.model_id or args.season
+    path = args.models_dir / f"model_metadata_{args.competition}_{model_label}.json"
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
@@ -180,9 +182,10 @@ def main() -> None:
         if path.exists():
             written.append(path)
 
+    model_label = args.model_id or args.season
     model_paths = {
-        "shot": Path(str(metadata.get("shot_model") or args.models_dir / f"shot_model_{args.competition}_{args.season}.json")),
-        "goal": Path(str(metadata.get("goal_model") or args.models_dir / f"xg_model_{args.competition}_{args.season}.json")),
+        "shot": Path(str(metadata.get("shot_model") or args.models_dir / f"shot_model_{args.competition}_{model_label}.json")),
+        "goal": Path(str(metadata.get("goal_model") or args.models_dir / f"xg_model_{args.competition}_{model_label}.json")),
     }
     for label, model_path in model_paths.items():
         path = args.output_dir / f"importance_{label}_{args.competition}_{args.season}.png"

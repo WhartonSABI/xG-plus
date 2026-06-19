@@ -47,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-model-path", type=Path, default=None)
     parser.add_argument("--competition", default="pl")
     parser.add_argument("--season", default="2024-2025")
+    parser.add_argument("--model-id", default=None, help="Model label to load; defaults to --season.")
     parser.add_argument("--limit-rows", type=int, default=0, help="0 means all rows; useful for smoke tests.")
     return parser.parse_args()
 
@@ -81,16 +82,17 @@ def read_merged_data(merged_dir: Path, competition: str, season: str, limit_rows
 
 
 def default_paths(args: argparse.Namespace) -> None:
+    model_label = args.model_id or args.season
     if args.predictions_path is None:
         args.predictions_path = Path("data/predictions") / f"predictions_{args.competition}_{args.season}.csv"
     if args.shots_path is None:
         args.shots_path = Path("data/predictions") / f"shots_{args.competition}_{args.season}.csv"
     if args.metadata_path is None:
-        args.metadata_path = args.models_dir / f"model_metadata_{args.competition}_{args.season}.json"
+        args.metadata_path = args.models_dir / f"model_metadata_{args.competition}_{model_label}.json"
     if args.shot_model_path is None:
-        args.shot_model_path = args.models_dir / f"shot_model_{args.competition}_{args.season}.json"
+        args.shot_model_path = args.models_dir / f"shot_model_{args.competition}_{model_label}.json"
     if args.goal_model_path is None:
-        args.goal_model_path = args.models_dir / f"xg_model_{args.competition}_{args.season}.json"
+        args.goal_model_path = args.models_dir / f"xg_model_{args.competition}_{model_label}.json"
 
 
 def read_model_metadata(path: Path) -> dict[str, Any]:
@@ -186,6 +188,7 @@ def main() -> None:
     prediction_meta = {
         "competition": args.competition,
         "season": args.season,
+        "model_id": args.model_id or args.season,
         "rows": int(len(predictions)),
         "shot_rows": int(len(shots)),
         "features": features,

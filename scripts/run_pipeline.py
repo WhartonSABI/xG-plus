@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-evaluate", action="store_true")
     parser.add_argument("--skip-plots", action="store_true")
     parser.add_argument("--shot-target", default="hasShotsIn1s")
+    parser.add_argument("--model-train-seasons", nargs="+", default=None, help="Train one shared model on these seasons.")
+    parser.add_argument("--model-id", default=None, help="Shared model label; defaults to joined --model-train-seasons.")
+    parser.add_argument("--cv-group", choices=["matchday", "game"], default="matchday")
+    parser.add_argument("--games-per-matchday", type=int, default=10)
+    parser.add_argument("--hyperparameter-trials", type=int, default=0, help="0 means tune boosting rounds only.")
+    parser.add_argument("--nthread", type=int, default=0, help="XGBoost training threads; 0 lets XGBoost choose.")
     parser.add_argument("--min-shot-rows", type=int, default=100)
     parser.add_argument("--process-dir", type=Path, default=Path("data/process_games"))
     parser.add_argument("--merged-games-dir", type=Path, default=Path("data/merged_games"))
@@ -144,9 +150,6 @@ def main() -> None:
         )
 
     for season in seasons:
-        predictions_path = args.predictions_path or Path("data/predictions") / f"predictions_{args.competition}_{season}.csv"
-        shots_path = args.shots_path or Path("data/predictions") / f"shots_{args.competition}_{season}.csv"
-
         extract_cmd = [
             sys.executable,
             str(scripts_dir / "04_extract_attacks.py"),
@@ -200,22 +203,44 @@ def main() -> None:
         if args.skip_existing:
             label_cmd.append("--skip-existing")
 
-        train_cmd = [
-            sys.executable,
-            str(scripts_dir / "06_train_xgboost_models.py"),
-            "--merged-dir",
-            str(args.merged_dir),
-            "--models-dir",
-            str(args.models_dir),
-            "--competition",
-            args.competition,
-            "--season",
-            season,
-            "--shot-target",
-            args.shot_target,
-            "--min-shot-rows",
-            str(args.min_shot_rows),
-        ]
+        run(extract_cmd)
+        run(label_cmd)
+
+    shared_model_id = None
+    if args.model_train_seasons:
+        shared_model_id = args.model_id or "_".join(args.model_train_seasons)
+        if not args.skip_train:
+            train_cmd = [
+                sys.executable,
+                str(scripts_dir / "06_train_xgboost_models.py"),
+                "--merged-dir",
+                str(args.merged_dir),
+                "--models-dir",
+                str(args.models_dir),
+                "--competition",
+                args.competition,
+                "--train-seasons",
+                *args.model_train_seasons,
+                "--model-id",
+                shared_model_id,
+                "--shot-target",
+                args.shot_target,
+                "--min-shot-rows",
+                str(args.min_shot_rows),
+                "--cv-group",
+                args.cv_group,
+                "--games-per-matchday",
+                str(args.games_per_matchday),
+                "--hyperparameter-trials",
+                str(args.hyperparameter_trials),
+                "--nthread",
+                str(args.nthread),
+            ]
+            run(train_cmd)
+
+    for season in seasons:
+        predictions_path = args.predictions_path or Path("data/predictions") / f"predictions_{args.competition}_{season}.csv"
+        shots_path = args.shots_path or Path("data/predictions") / f"shots_{args.competition}_{season}.csv"
 
         predict_cmd = [
             sys.executable,
@@ -268,15 +293,44 @@ def main() -> None:
             args.shot_target,
         ]
 
-        run(extract_cmd)
-        run(label_cmd)
-        if not args.skip_train:
+        if not args.skip_train and shared_model_id is None:
+            train_cmd = [
+                sys.executable,
+                str(scripts_dir / "06_train_xgboost_models.py"),
+                "--merged-dir",
+                str(args.merged_dir),
+                "--models-dir",
+                str(args.models_dir),
+                "--competition",
+                args.competition,
+                "--season",
+                season,
+                "--shot-target",
+                args.shot_target,
+                "--min-shot-rows",
+                str(args.min_shot_rows),
+                "--cv-group",
+                args.cv_group,
+                "--games-per-matchday",
+                str(args.games_per_matchday),
+                "--hyperparameter-trials",
+                str(args.hyperparameter_trials),
+                "--nthread",
+                str(args.nthread),
+            ]
             run(train_cmd)
+
         if not args.skip_predict:
+            if shared_model_id is not None:
+                predict_cmd += ["--model-id", shared_model_id]
             run(predict_cmd)
         if not args.skip_evaluate:
+            if shared_model_id is not None:
+                evaluate_cmd += ["--model-id", shared_model_id]
             run(evaluate_cmd)
         if not args.skip_plots:
+            if shared_model_id is not None:
+                plots_cmd += ["--model-id", shared_model_id]
             run(plots_cmd)
 
     print("xG+ preprocessing complete." if args.preprocess_only else "xG+ pipeline complete.")

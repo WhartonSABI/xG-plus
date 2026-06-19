@@ -60,6 +60,28 @@ To resume and opt out of already-created per-game files:
 scripts/run_preprocessing_12core.sh --skip-existing
 ```
 
+## Paper-Grade Model Training
+
+Step 06 now defaults to grouped cross-validation by inferred EPL matchday rather than by individual frame. Matchdays are inferred within each season by sorting the game schedule by match date and assigning blocks of 10 games to matchdays. This prevents neighboring frames, attacks, or games from the same matchday from leaking across training and validation folds.
+
+For the paper holdout setup, train one shared model on 2022-2023 and 2023-2024, then predict/evaluate 2024-2025:
+
+```bash
+python scripts/run_pipeline.py \
+  --competition pl \
+  --seasons 2024-2025 \
+  --workers 12 \
+  --skip-existing \
+  --allow-temp-files \
+  --model-train-seasons 2022-2023 2023-2024 \
+  --model-id train_2022_2024 \
+  --cv-group matchday \
+  --hyperparameter-trials 20 \
+  --nthread 12
+```
+
+`--hyperparameter-trials 0` keeps the current hyperparameters and uses matchday-grouped CV only to select the number of boosting rounds with early stopping. Values above zero run a randomized search over the configured XGBoost grids separately for xS and xG, still using matchday-grouped folds and log loss.
+
 ## Pitch Geometry
 
 Tracking coordinates are treated as native PFF metric coordinates for each match, not rescaled to a standard field. Step 04 resolves the active `metadata.json` stadium pitch record by match date and uses that pitch length for final-third entry, distance to goal, and shot angle features. Step 05 carries `pitch_id`, `pitch_length`, and `pitch_width` into merged training rows, and prediction/export/render steps preserve those columns for diagnostics and visuals.
