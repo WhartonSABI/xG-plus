@@ -7,6 +7,8 @@ import argparse
 import bz2
 import json
 import math
+import subprocess
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("data/process_games"))
     parser.add_argument("--limit-games", type=int, default=0, help="0 means all games.")
     parser.add_argument("--skip-existing", action="store_true")
+    parser.add_argument(
+        "--repair-corrupt-tracking",
+        action="store_true",
+        help="On a corrupt local tracking .bz2, re-download that game once and retry extraction.",
+    )
+    parser.add_argument(
+        "--continue-on-unrepairable-corrupt-tracking",
+        action="store_true",
+        help="If repair also fails for a corrupt tracking game, record the game and continue.",
+    )
+    parser.add_argument(
+        "--tracking-credentials-from",
+        type=Path,
+        default=None,
+        help="Optional archived Python file containing AWS os.environ assignments for repair downloads.",
+    )
+    parser.add_argument("--repair-workers", type=int, default=4)
     return parser.parse_args()
 
 
@@ -107,13 +126,90 @@ def build_roster_lookup(rows: pd.DataFrame) -> dict[int, dict[str, Any]]:
 
 def parse_tracking_jsonl(path: Path) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
-    with bz2.open(path, "rt", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            rows.append(json.loads(line))
+    try:
+        with bz2.open(path, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+    except EOFError as exc:
+        raise ValueError(f"Corrupt or truncated bzip2 tracking file: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"Could not read compressed tracking file: {path}: {exc}") from exc
     return pd.DataFrame(rows)
+
+
+def is_corrupt_tracking_error(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "Corrupt or truncated bzip2 tracking file" in text
+        or "Compressed file ended before the end-of-stream marker" in text
+    )
+
+
+def repair_tracking_game(args: argparse.Namespace, game: str) -> None:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("02_scrape_tracking.py")),
+        "--output-root",
+        str(args.tracking_root),
+        "--competition",
+        args.competition,
+        "--seasons",
+        args.season,
+        "--games",
+        game,
+        "--force",
+        "--workers",
+        str(args.repair_workers),
+    ]
+    if args.tracking_credentials_from is not None:
+        cmd += ["--credentials-from", str(args.tracking_credentials_from)]
+    print(f"Repairing corrupt tracking game {game}: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def process_with_optional_repair(
+    args: argparse.Namespace,
+    task: tuple[str, Path, Path, Path],
+    exc: Exception,
+) -> tuple[str, int, str]:
+    game, tracking_path, metadata_path, rosters_path = task
+    if not args.repair_corrupt_tracking or not is_corrupt_tracking_error(exc):
+        return game, 0, f"error: {exc}"
+    try:
+        repair_tracking_game(args, game)
+        return process_one_game(
+            args.competition,
+            args.season,
+            game,
+            tracking_path,
+            metadata_path,
+            rosters_path,
+            args.output_dir,
+        )
+    except Exception as retry_exc:
+        if args.continue_on_unrepairable_corrupt_tracking:
+            return game, 0, f"unrepairable_corrupt_tracking: {retry_exc}"
+        return game, 0, f"error after repair: {retry_exc}"
+
+
+def write_failure_report(args: argparse.Namespace, rows: list[tuple[str, int, str]]) -> None:
+    if not rows:
+        return
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = args.output_dir / f"extraction_failures_{args.competition}_{args.season}.json"
+    report = [
+        {
+            "game": game,
+            "rows": rows_count,
+            "status": status,
+        }
+        for game, rows_count, status in sorted(rows)
+    ]
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"Wrote extraction failure report: {report_path}")
 
 
 def compute_in_play(df: pd.DataFrame) -> pd.Series:
@@ -508,23 +604,27 @@ def main() -> None:
 
     results: list[tuple[str, int, str]] = []
     if args.workers <= 1:
-        for game, tracking_path, metadata_path, rosters_path in tqdm(tasks, total=len(tasks), desc="Extract tracking"):
-            results.append(
-                process_one_game(
-                    args.competition,
-                    args.season,
-                    game,
-                    tracking_path,
-                    metadata_path,
-                    rosters_path,
-                    args.output_dir,
+        for task in tqdm(tasks, total=len(tasks), desc="Extract attack features"):
+            game, tracking_path, metadata_path, rosters_path = task
+            try:
+                results.append(
+                    process_one_game(
+                        args.competition,
+                        args.season,
+                        game,
+                        tracking_path,
+                        metadata_path,
+                        rosters_path,
+                        args.output_dir,
+                    )
                 )
-            )
+            except Exception as exc:
+                results.append(process_with_optional_repair(args, task, exc))
     else:
         executor_cls = ProcessPoolExecutor
         try:
             with executor_cls(max_workers=args.workers) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         process_one_game,
                         args.competition,
@@ -534,14 +634,18 @@ def main() -> None:
                         metadata_path,
                         rosters_path,
                         args.output_dir,
-                    )
+                    ): (game, tracking_path, metadata_path, rosters_path)
                     for game, tracking_path, metadata_path, rosters_path in tasks
-                ]
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Extract tracking"):
-                    results.append(future.result())
+                }
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Extract attack features"):
+                    task = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        results.append(process_with_optional_repair(args, task, exc))
         except PermissionError:
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         process_one_game,
                         args.competition,
@@ -551,11 +655,15 @@ def main() -> None:
                         metadata_path,
                         rosters_path,
                         args.output_dir,
-                    )
+                    ): (game, tracking_path, metadata_path, rosters_path)
                     for game, tracking_path, metadata_path, rosters_path in tasks
-                ]
-                for future in tqdm(as_completed(futures), total=len(futures), desc="Extract tracking (threads)"):
-                    results.append(future.result())
+                }
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Extract attack features (threads)"):
+                    task = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        results.append(process_with_optional_repair(args, task, exc))
 
     ok = [row for row in results if row[2] == "ok"]
     skipped = [row for row in results if row[2] != "ok"]
@@ -564,6 +672,10 @@ def main() -> None:
         print(f"Skipped/empty {len(skipped)} games:")
         for game, rows, status in sorted(skipped):
             print(f"  {game}: {status} ({rows} rows)")
+        write_failure_report(args, skipped)
+    failed = [row for row in results if row[2].startswith("error:")]
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

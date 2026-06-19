@@ -21,6 +21,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-games", type=int, default=0)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument(
+        "--repair-corrupt-tracking",
+        action="store_true",
+        help="During extraction, re-download a corrupt local tracking game once and retry it.",
+    )
+    parser.add_argument(
+        "--continue-on-unrepairable-corrupt-tracking",
+        action="store_true",
+        help="If a corrupt tracking game cannot be repaired, record it and continue preprocessing.",
+    )
+    parser.add_argument(
+        "--tracking-credentials-from",
+        type=Path,
+        default=None,
+        help="Optional archived Python file containing AWS os.environ assignments for tracking repair/downloads.",
+    )
+    parser.add_argument("--repair-workers", type=int, default=4)
+    parser.add_argument(
         "--preprocess-only",
         action="store_true",
         help="Run through extraction and event labeling, then stop before model fitting.",
@@ -29,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-scrapers", action="store_true", help="Mirror raw event/tracking data before validating.")
     parser.add_argument("--skip-env-check", action="store_true")
     parser.add_argument("--skip-raw-validation", action="store_true")
+    parser.add_argument("--allow-temp-files", action="store_true", help="Warn on raw mirror *.tmp files instead of failing validation.")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-predict", action="store_true")
     parser.add_argument("--skip-evaluate", action="store_true")
@@ -122,6 +140,7 @@ def main() -> None:
                 "--seasons",
                 *seasons,
             ]
+            + (["--allow-temp-files"] if args.allow_temp_files else [])
         )
 
     for season in seasons:
@@ -146,6 +165,13 @@ def main() -> None:
             extract_cmd += ["--limit-games", str(args.limit_games)]
         if args.skip_existing:
             extract_cmd.append("--skip-existing")
+        if args.repair_corrupt_tracking:
+            extract_cmd.append("--repair-corrupt-tracking")
+        if args.continue_on_unrepairable_corrupt_tracking:
+            extract_cmd.append("--continue-on-unrepairable-corrupt-tracking")
+        if args.tracking_credentials_from is not None:
+            extract_cmd += ["--tracking-credentials-from", str(args.tracking_credentials_from)]
+        extract_cmd += ["--repair-workers", str(args.repair_workers)]
 
         label_cmd = [
             sys.executable,

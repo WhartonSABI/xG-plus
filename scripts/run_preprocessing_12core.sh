@@ -10,9 +10,19 @@ cmd=(
   --competition pl \
   --seasons 2022-2023 2023-2024 2024-2025 \
   --workers 12 \
+  --repair-corrupt-tracking \
+  --continue-on-unrepairable-corrupt-tracking \
+  --allow-temp-files \
   --preprocess-only
-  "$@"
 )
+
+if [[ -n "${TRACKING_CREDENTIALS_FROM:-}" ]]; then
+  cmd+=(--tracking-credentials-from "$TRACKING_CREDENTIALS_FROM")
+elif [[ -f archived/local/sagemaker/features.py ]]; then
+  cmd+=(--tracking-credentials-from archived/local/sagemaker/features.py)
+fi
+
+cmd+=("$@")
 
 if [[ "${CAFFEINATE:-1}" != "0" ]] && command -v caffeinate >/dev/null 2>&1; then
   exec caffeinate -dims "${cmd[@]}"

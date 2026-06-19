@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--competition", default="pl")
     parser.add_argument("--seasons", nargs="+", default=["2022-2023", "2023-2024", "2024-2025"])
     parser.add_argument("--expected-games", type=int, default=380)
+    parser.add_argument("--allow-temp-files", action="store_true", help="Warn on *.tmp files instead of failing.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     return parser.parse_args()
 
@@ -88,7 +89,7 @@ def validate_season(args: argparse.Namespace, season: str) -> dict[str, Any]:
         problems.append(f"{len(tracking_ids - event_ids)} tracking ids have no event csv")
     if zero_byte_files:
         problems.append(f"{len(zero_byte_files)} zero-byte files")
-    if tmp_files:
+    if tmp_files and not args.allow_temp_files:
         problems.append(f"{len(tmp_files)} temporary download files")
 
     return {
@@ -100,6 +101,7 @@ def validate_season(args: argparse.Namespace, season: str) -> dict[str, Any]:
         "missing_tracking_parts": missing_tracking_parts,
         "zero_byte_files": zero_byte_files,
         "tmp_files": tmp_files,
+        "warnings": [f"{len(tmp_files)} temporary download files"] if tmp_files and args.allow_temp_files else [],
         "problems": problems,
     }
 
@@ -119,6 +121,8 @@ def main() -> None:
             )
             for problem in result["problems"]:
                 print(f"  {problem}")
+            for warning in result["warnings"]:
+                print(f"  warn: {warning}")
 
     if any(result["problems"] for result in results):
         raise SystemExit(1)

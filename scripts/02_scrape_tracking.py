@@ -8,7 +8,9 @@ AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION.
 from __future__ import annotations
 
 import argparse
+import bz2
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -48,13 +50,42 @@ def local_path_for_key(key: str, output_root: Path) -> Path:
     return output_root / relative
 
 
+def validate_bz2(path: Path) -> None:
+    with bz2.open(path, "rb") as fh:
+        while fh.read(1024 * 1024):
+            pass
+
+
+def load_archived_credentials(path: Path) -> None:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    assignments = dict(
+        re.findall(
+            r'os\.environ\["(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_REGION)"\]\s*=\s*["\']([^"\']+)["\']',
+            text,
+        )
+    )
+    missing = [key for key in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] if not assignments.get(key)]
+    if missing:
+        raise SystemExit(f"Missing archived AWS assignments in {path}: {', '.join(missing)}")
+    for key, value in assignments.items():
+        if value == "REDACTED":
+            raise SystemExit(f"Archived AWS assignment for {key} is redacted in {path}")
+        os.environ[key] = value
+
+
 def download_one(client, bucket: str, key: str, output_path: Path, expected_size: int, force: bool) -> str:
     if output_path.exists() and output_path.stat().st_size == expected_size and not force:
         return "skipped"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
-    client.download_file(bucket, key, str(tmp_path))
-    tmp_path.replace(output_path)
+    try:
+        client.download_file(bucket, key, str(tmp_path))
+        if output_path.suffix == ".bz2":
+            validate_bz2(tmp_path)
+        tmp_path.replace(output_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return "downloaded"
 
 
@@ -64,6 +95,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=Path("pff-tracking"))
     parser.add_argument("--competition", default="pl")
     parser.add_argument("--seasons", nargs="+", default=["2022-2023", "2023-2024", "2024-2025"])
+    parser.add_argument("--games", nargs="+", default=None, help="Optional game ids to mirror within each season.")
+    parser.add_argument(
+        "--credentials-from",
+        type=Path,
+        default=None,
+        help="Optional archived Python file containing AWS os.environ assignments.",
+    )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
@@ -71,10 +109,21 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.credentials_from is not None:
+        load_archived_credentials(args.credentials_from)
     region = os.environ.get("AWS_REGION", "us-east-1")
     client = boto3.client("s3", region_name=region)
-    prefixes = [f"pff-data/tracking/{args.competition}/{season}/" for season in args.seasons]
+    if args.games:
+        prefixes = [
+            f"pff-data/tracking/{args.competition}/{season}/{game}/"
+            for season in args.seasons
+            for game in args.games
+        ]
+    else:
+        prefixes = [f"pff-data/tracking/{args.competition}/{season}/" for season in args.seasons]
     objects = list_keys(client, args.bucket, prefixes)
+    if not objects:
+        raise SystemExit(f"No tracking files found for prefixes: {prefixes}")
     total_size = sum(obj["Size"] for obj in objects)
     print(f"Found {len(objects)} files under {', '.join(prefixes)} ({total_size / 1e9:.2f} GB)")
 
@@ -103,6 +152,8 @@ def main() -> None:
         "Done: "
         f"{counts['downloaded']} downloaded, {counts['skipped']} skipped, {counts['failed']} failed"
     )
+    if counts["failed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

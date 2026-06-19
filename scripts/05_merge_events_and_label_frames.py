@@ -61,6 +61,7 @@ for i in range(5):
 
 
 LABEL_VERSION = "event-label-v2"
+CHUNK_VERSION = "merged-chunk-v2"
 
 
 def parse_args() -> argparse.Namespace:
@@ -314,19 +315,73 @@ def process_one_file(
     return process_file.name, len(out), "ok"
 
 
-def build_chunks(source_dir: Path, chunk_dir: Path, competition: str, season: str, chunk_size: int) -> list[Path]:
+def chunk_is_current(out_path: Path, part: list[Path], chunk_size: int) -> bool:
+    if not out_path.exists():
+        return False
+    meta_path = sidecar_path(out_path)
+    if meta_path.exists():
+        try:
+            metadata = load_json(meta_path)
+        except (OSError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(metadata, dict)
+            and metadata.get("chunk_version") == CHUNK_VERSION
+            and metadata.get("chunk_size") == chunk_size
+            and metadata.get("source_files") == [path.name for path in part]
+        )
+    return out_path.stat().st_mtime >= max(path.stat().st_mtime for path in part)
+
+
+def write_chunk_sidecar(out_path: Path, part: list[Path], rows: int, chunk_size: int) -> None:
+    sidecar_path(out_path).write_text(
+        json.dumps(
+            {
+                "chunk_version": CHUNK_VERSION,
+                "chunk_size": chunk_size,
+                "rows": int(rows),
+                "source_files": [path.name for path in part],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def build_chunks(
+    source_dir: Path,
+    chunk_dir: Path,
+    competition: str,
+    season: str,
+    chunk_size: int,
+    skip_existing: bool,
+) -> list[Path]:
     files = sorted(source_dir.glob(f"train_{competition}_{season}_*.csv"))
     if not files:
         return []
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     outputs: list[Path] = []
-    for chunk_idx, start in enumerate(range(0, len(files), chunk_size)):
+    written = 0
+    reused = 0
+    starts = list(range(0, len(files), chunk_size))
+    for chunk_idx, start in tqdm(
+        list(enumerate(starts)),
+        total=len(starts),
+        desc=f"Build chunks {season}",
+    ):
         part = files[start : start + chunk_size]
-        df = pd.concat((pd.read_csv(path) for path in part), ignore_index=True)
         out_path = chunk_dir / f"train_{competition}_{season}_{chunk_idx}.csv"
+        if skip_existing and chunk_is_current(out_path, part, chunk_size):
+            reused += 1
+            outputs.append(out_path)
+            continue
+        df = pd.concat((pd.read_csv(path) for path in part), ignore_index=True)
         df.to_csv(out_path, index=False)
+        write_chunk_sidecar(out_path, part, len(df), chunk_size)
+        written += 1
         outputs.append(out_path)
+    print(f"Chunks {season}: {written} written, {reused} reused")
     return outputs
 
 
@@ -398,10 +453,17 @@ def main() -> None:
     else:
         print("All labeled files already exist; skipping per-game export.")
 
-    chunks = build_chunks(args.output_dir, args.chunk_dir, args.competition, args.season, args.chunk_size)
+    chunks = build_chunks(
+        args.output_dir,
+        args.chunk_dir,
+        args.competition,
+        args.season,
+        args.chunk_size,
+        args.skip_existing,
+    )
     if not chunks:
         raise SystemExit("No chunked outputs were created.")
-    print(f"Wrote {len(chunks)} chunk files to {args.chunk_dir}")
+    print(f"Prepared {len(chunks)} chunk files in {args.chunk_dir}")
 
 
 if __name__ == "__main__":

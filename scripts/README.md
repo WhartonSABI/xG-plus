@@ -30,6 +30,14 @@ Use `--run-scrapers` only when AWS credentials are configured and you want to re
 
 The shot model target defaults to `hasShotsIn1s`: a frame is positive when the same attacking side takes a shot within the next second of the same merged attack. Exact shot rows are also retained as `is_shot`; goal rows are retained as `is_goal`.
 
+To repair one local tracking game without re-downloading a full season:
+
+```bash
+python scripts/02_scrape_tracking.py --competition pl --seasons 2023-2024 --games 13472 --force --workers 4 --credentials-from archived/local/sagemaker/features.py
+```
+
+Downloaded `.bz2` files are decompressed once before replacing the local copy, so a truncated download fails fast.
+
 To run only raw validation, attack extraction, feature engineering, event labeling, and chunk export, stop before fitting probability models:
 
 ```bash
@@ -43,6 +51,8 @@ For a 12-core terminal run across all local PL seasons:
 ```bash
 scripts/run_preprocessing_12core.sh
 ```
+
+This enables corrupt-tracking repair by default: if one local tracking `.bz2` is truncated, the extractor re-downloads that game with `--force`, validates the replacement, retries that game once, and keeps processing. If the source download is also corrupt, the game is recorded in `data/process_games/extraction_failures_{competition}_{season}.json` and preprocessing continues. Temporary raw download files are warnings in this preprocessing mode. The script uses `archived/local/sagemaker/features.py` for AWS credentials when that ignored local file exists. Override with `TRACKING_CREDENTIALS_FROM=/path/to/file`.
 
 To resume and opt out of already-created per-game files:
 
